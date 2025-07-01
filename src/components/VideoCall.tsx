@@ -37,6 +37,27 @@ const STUN_SERVERS = [
   { urls: 'stun:stun4.l.google.com:19302' }
 ];
 
+// 低負荷設定: 小さい解像度とフレームレート
+const LOW_QUALITY_VIDEO_CONSTRAINTS = {
+  width: { ideal: 320, max: 480 },
+  height: { ideal: 240, max: 360 },
+  frameRate: { ideal: 15, max: 20 }
+};
+
+const LOW_QUALITY_SCREEN_CONSTRAINTS = {
+  width: { ideal: 640, max: 1280 },
+  height: { ideal: 480, max: 720 },
+  frameRate: { ideal: 10, max: 15 }
+};
+
+const AUDIO_CONSTRAINTS = {
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  sampleRate: 16000, // 低いサンプルレート
+  channelCount: 1     // モノラル
+};
+
 export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveCall }) => {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -59,18 +80,10 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
       try {
         console.log('Initializing call for user:', userId.current, 'in room:', roomId);
         
-        // Get user media first
+        // 低品質設定でユーザーメディアを取得
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { 
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30 }
-          },
-          audio: { 
-            echoCancellation: true, 
-            noiseSuppression: true,
-            autoGainControl: true
-          }
+          video: LOW_QUALITY_VIDEO_CONSTRAINTS,
+          audio: AUDIO_CONSTRAINTS
         });
         
         console.log('Got local stream:', stream.getTracks().map(t => t.kind));
@@ -427,9 +440,14 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
   const toggleScreenShare = useCallback(async () => {
     if (!isScreenSharing) {
       try {
+        // 低品質設定で画面共有を開始
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: true
+          video: LOW_QUALITY_SCREEN_CONSTRAINTS,
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            sampleRate: 16000
+          }
         });
         
         // Replace video track in all peer connections
@@ -567,6 +585,9 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
             {connectionStatus === 'connected' ? '接続済み' : 
              connectionStatus === 'connecting' ? '接続中' : '接続失敗'}
           </span>
+          <div className="text-xs text-green-400 bg-green-900 px-2 py-1 rounded">
+            低負荷モード
+          </div>
         </div>
       </div>
 
@@ -613,6 +634,9 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
                 </div>
               </div>
             </div>
+            <div className="mt-3 p-2 bg-green-900 rounded text-green-200 text-xs">
+              <strong>省電力モード:</strong> 低解像度・低フレームレートで動作中
+            </div>
             <button
               onClick={() => setShowRoomInfo(false)}
               className="mt-3 w-full py-2 text-gray-400 hover:text-white transition-colors text-sm"
@@ -623,11 +647,11 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         </div>
       )}
 
-      {/* Video Grid */}
-      <div className="flex-1 p-4">
-        <div className={`grid gap-2 h-full ${getGridLayout(totalParticipants)}`}>
-          {/* Local Video */}
-          <div className="relative bg-gray-800 rounded-lg overflow-hidden min-h-0">
+      {/* Video Grid - 小さいサイズで表示 */}
+      <div className="flex-1 p-2">
+        <div className={`grid gap-1 h-full ${getGridLayout(totalParticipants)}`}>
+          {/* Local Video - 小さく表示 */}
+          <div className="relative bg-gray-800 rounded-lg overflow-hidden min-h-0 max-h-48">
             <video
               ref={localVideoRef}
               autoPlay
@@ -637,31 +661,31 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
             />
             {!isVideoOn && (
               <div className="absolute inset-0 bg-gray-700 flex items-center justify-center">
-                <div className="w-16 h-16 bg-gray-600 rounded-full flex items-center justify-center">
-                  <span className="text-white text-xl font-semibold">
+                <div className="w-12 h-12 bg-gray-600 rounded-full flex items-center justify-center">
+                  <span className="text-white text-sm font-semibold">
                     {userName.charAt(0).toUpperCase()}
                   </span>
                 </div>
               </div>
             )}
-            <div className="absolute bottom-2 left-2 bg-black bg-opacity-60 px-2 py-1 rounded text-white text-xs">
+            <div className="absolute bottom-1 left-1 bg-black bg-opacity-60 px-1 py-0.5 rounded text-white text-xs">
               {userName} (あなた)
             </div>
-            <div className="absolute top-2 right-2 flex space-x-1">
+            <div className="absolute top-1 right-1 flex space-x-1">
               {!isAudioOn && (
-                <div className="w-6 h-6 bg-red-500 rounded-full flex items-center justify-center">
-                  <MicOff size={12} className="text-white" />
+                <div className="w-5 h-5 bg-red-500 rounded-full flex items-center justify-center">
+                  <MicOff size={10} className="text-white" />
                 </div>
               )}
               {isScreenSharing && (
-                <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center">
-                  <Monitor size={12} className="text-white" />
+                <div className="w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center">
+                  <Monitor size={10} className="text-white" />
                 </div>
               )}
             </div>
           </div>
 
-          {/* Remote Videos */}
+          {/* Remote Videos - 小さく表示 */}
           {participantsList.map((participant) => (
             <RemoteVideo
               key={participant.userId}
@@ -746,7 +770,7 @@ const RemoteVideo: React.FC<RemoteVideoProps> = ({ participant }) => {
   }, [participant.stream, participant.userId]);
 
   return (
-    <div className="relative bg-gray-800 rounded-lg overflow-hidden min-h-0">
+    <div className="relative bg-gray-800 rounded-lg overflow-hidden min-h-0 max-h-48">
       {participant.stream && participant.isVideoOn !== false ? (
         <video
           ref={videoRef}
@@ -756,22 +780,22 @@ const RemoteVideo: React.FC<RemoteVideoProps> = ({ participant }) => {
         />
       ) : (
         <div className="w-full h-full bg-gray-700 flex items-center justify-center">
-          <div className="w-16 h-16 bg-gray-600 rounded-full flex items-center justify-center">
-            <span className="text-white text-xl font-semibold">
+          <div className="w-12 h-12 bg-gray-600 rounded-full flex items-center justify-center">
+            <span className="text-white text-sm font-semibold">
               {participant.userName.charAt(0).toUpperCase()}
             </span>
           </div>
         </div>
       )}
       
-      <div className="absolute bottom-2 left-2 bg-black bg-opacity-60 px-2 py-1 rounded text-white text-xs">
+      <div className="absolute bottom-1 left-1 bg-black bg-opacity-60 px-1 py-0.5 rounded text-white text-xs">
         {participant.userName}
       </div>
       
-      <div className="absolute top-2 right-2 flex space-x-1">
+      <div className="absolute top-1 right-1 flex space-x-1">
         {participant.isAudioOn === false && (
-          <div className="w-6 h-6 bg-red-500 rounded-full flex items-center justify-center">
-            <MicOff size={12} className="text-white" />
+          <div className="w-5 h-5 bg-red-500 rounded-full flex items-center justify-center">
+            <MicOff size={10} className="text-white" />
           </div>
         )}
       </div>
