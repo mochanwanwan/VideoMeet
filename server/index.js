@@ -13,7 +13,11 @@ const io = new Server(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"]
-  }
+  },
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  upgradeTimeout: 30000,
+  allowUpgrades: true
 });
 
 // Serve static files from the dist directory
@@ -30,6 +34,11 @@ const rooms = new Map();
 io.on('connection', (socket) => {
   console.log('=== NEW CONNECTION ===');
   console.log('User connected with socket ID:', socket.id);
+
+  // ハートビート機能
+  socket.on('ping', () => {
+    socket.emit('pong');
+  });
 
   socket.on('join-room', ({ roomId, userId, userName }) => {
     console.log('=== JOIN ROOM REQUEST ===');

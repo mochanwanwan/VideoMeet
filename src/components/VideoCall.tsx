@@ -73,6 +73,8 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
   const userId = useRef(Math.random().toString(36).substr(2, 9));
   const socketRef = useRef<Socket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Initialize WebRTC and Socket connection
   useEffect(() => {
@@ -100,16 +102,33 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         const newSocket = io(socketUrl, {
           transports: ['websocket', 'polling'],
           timeout: 20000,
-          forceNew: true
+          forceNew: true,
+          reconnection: true,
+          reconnectionAttempts: 5,
+          reconnectionDelay: 1000,
+          reconnectionDelayMax: 5000
         });
         
         socketRef.current = newSocket;
         setSocket(newSocket);
 
+        // ハートビート機能を追加してコネクションを維持
+        const startHeartbeat = () => {
+          if (heartbeatIntervalRef.current) {
+            clearInterval(heartbeatIntervalRef.current);
+          }
+          heartbeatIntervalRef.current = setInterval(() => {
+            if (newSocket.connected) {
+              newSocket.emit('ping');
+            }
+          }, 25000); // 25秒ごとにpingを送信
+        };
+
         // Socket event handlers
         newSocket.on('connect', () => {
           console.log('Socket connected with ID:', newSocket.id);
           setConnectionStatus('connected');
+          startHeartbeat();
           
           // Join room after socket connection is established
           console.log('Joining room:', roomId, 'as user:', userId.current, userName);
@@ -128,6 +147,22 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         newSocket.on('disconnect', (reason) => {
           console.log('Socket disconnected:', reason);
           setConnectionStatus('connecting');
+          
+          if (heartbeatIntervalRef.current) {
+            clearInterval(heartbeatIntervalRef.current);
+          }
+          
+          // 自動再接続の試行
+          if (reason === 'io server disconnect') {
+            // サーバーが切断した場合は手動で再接続
+            setTimeout(() => {
+              newSocket.connect();
+            }, 1000);
+          }
+        });
+
+        newSocket.on('pong', () => {
+          console.log('Received pong from server');
         });
 
         // WebRTC signaling handlers
@@ -245,6 +280,15 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
 
     return () => {
       console.log('=== CLEANUP ===');
+      
+      // Clear intervals
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      
       // Stop all tracks
       if (localStream) {
         localStream.getTracks().forEach(track => {
@@ -272,7 +316,9 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
     console.log('Creating peer connection for:', targetUserId);
     
     const peerConnection = new RTCPeerConnection({
-      iceServers: STUN_SERVERS
+      iceServers: STUN_SERVERS,
+      iceCandidatePoolSize: 10,
+      iceTransportPolicy: 'all'
     });
 
     // Add local stream tracks
@@ -286,6 +332,19 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
       console.log('=== RECEIVED REMOTE TRACK ===');
       console.log('Track from:', targetUserId, 'kind:', event.track.kind);
       const [remoteStream] = event.streams;
+      
+      // ストリームの状態を監視
+      remoteStream.getTracks().forEach(track => {
+        track.onended = () => {
+          console.log('Remote track ended:', track.kind, 'from:', targetUserId);
+        };
+        track.onmute = () => {
+          console.log('Remote track muted:', track.kind, 'from:', targetUserId);
+        };
+        track.onunmute = () => {
+          console.log('Remote track unmuted:', track.kind, 'from:', targetUserId);
+        };
+      });
       
       setParticipants(prev => {
         const updated = new Map(prev);
@@ -310,17 +369,36 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
       }
     };
 
-    // Handle connection state changes
+    // Handle connection state changes with better error handling
     peerConnection.onconnectionstatechange = () => {
       console.log(`Peer connection state with ${targetUserId}:`, peerConnection.connectionState);
       if (peerConnection.connectionState === 'failed') {
         console.log('Peer connection failed, attempting to restart ICE');
         peerConnection.restartIce();
+      } else if (peerConnection.connectionState === 'disconnected') {
+        console.log('Peer connection disconnected, will attempt to reconnect');
+        // 短時間後に再接続を試行
+        setTimeout(() => {
+          if (peerConnection.connectionState === 'disconnected') {
+            peerConnection.restartIce();
+          }
+        }, 3000);
       }
     };
 
     peerConnection.oniceconnectionstatechange = () => {
       console.log(`ICE connection state with ${targetUserId}:`, peerConnection.iceConnectionState);
+      if (peerConnection.iceConnectionState === 'failed') {
+        console.log('ICE connection failed, restarting ICE');
+        peerConnection.restartIce();
+      }
+    };
+
+    // データチャンネルの状態監視
+    peerConnection.ondatachannel = (event) => {
+      const channel = event.channel;
+      channel.onopen = () => console.log('Data channel opened with:', targetUserId);
+      channel.onclose = () => console.log('Data channel closed with:', targetUserId);
     };
 
     peerConnections.current.set(targetUserId, peerConnection);
@@ -647,11 +725,11 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         </div>
       )}
 
-      {/* Video Grid - 小さいサイズで表示 */}
+      {/* Video Grid - アスペクト比を維持して小さく表示 */}
       <div className="flex-1 p-2">
         <div className={`grid gap-1 h-full ${getGridLayout(totalParticipants)}`}>
-          {/* Local Video - 小さく表示 */}
-          <div className="relative bg-gray-800 rounded-lg overflow-hidden min-h-0 max-h-48">
+          {/* Local Video - アスペクト比16:9を維持 */}
+          <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video">
             <video
               ref={localVideoRef}
               autoPlay
@@ -685,7 +763,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
             </div>
           </div>
 
-          {/* Remote Videos - 小さく表示 */}
+          {/* Remote Videos - アスペクト比16:9を維持 */}
           {participantsList.map((participant) => (
             <RemoteVideo
               key={participant.userId}
@@ -766,11 +844,36 @@ const RemoteVideo: React.FC<RemoteVideoProps> = ({ participant }) => {
     if (videoRef.current && participant.stream) {
       videoRef.current.srcObject = participant.stream;
       console.log('Set video stream for participant:', participant.userId);
+      
+      // ビデオ要素のイベントリスナーを追加
+      const videoElement = videoRef.current;
+      
+      const handleLoadedMetadata = () => {
+        console.log('Video metadata loaded for:', participant.userId);
+      };
+      
+      const handleCanPlay = () => {
+        console.log('Video can play for:', participant.userId);
+      };
+      
+      const handleError = (e: Event) => {
+        console.error('Video error for:', participant.userId, e);
+      };
+      
+      videoElement.addEventListener('loadedmetadata', handleLoadedMetadata);
+      videoElement.addEventListener('canplay', handleCanPlay);
+      videoElement.addEventListener('error', handleError);
+      
+      return () => {
+        videoElement.removeEventListener('loadedmetadata', handleLoadedMetadata);
+        videoElement.removeEventListener('canplay', handleCanPlay);
+        videoElement.removeEventListener('error', handleError);
+      };
     }
   }, [participant.stream, participant.userId]);
 
   return (
-    <div className="relative bg-gray-800 rounded-lg overflow-hidden min-h-0 max-h-48">
+    <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video">
       {participant.stream && participant.isVideoOn !== false ? (
         <video
           ref={videoRef}
