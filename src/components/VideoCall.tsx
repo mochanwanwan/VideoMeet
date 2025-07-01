@@ -68,6 +68,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'failed'>('connecting');
   const [showRoomInfo, setShowRoomInfo] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -81,6 +82,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
     const initializeCall = async () => {
       try {
         console.log('Initializing call for user:', userId.current, 'in room:', roomId);
+        setError(null);
         
         // 低品質設定でユーザーメディアを取得
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -128,6 +130,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         newSocket.on('connect', () => {
           console.log('Socket connected with ID:', newSocket.id);
           setConnectionStatus('connected');
+          setError(null);
           startHeartbeat();
           
           // Join room after socket connection is established
@@ -142,6 +145,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         newSocket.on('connect_error', (error) => {
           console.error('Socket connection error:', error);
           setConnectionStatus('failed');
+          setError('サーバーに接続できません');
         });
 
         newSocket.on('disconnect', (reason) => {
@@ -273,6 +277,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
       } catch (error) {
         console.error('Error initializing call:', error);
         setConnectionStatus('failed');
+        setError('カメラまたはマイクにアクセスできません');
       }
     };
 
@@ -620,7 +625,36 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
     return 'grid-cols-4 grid-rows-3'; // For more than 9 participants
   };
 
-  if (connectionStatus === 'failed') {
+  // エラー状態の表示
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <div className="text-center text-white max-w-md mx-auto p-6">
+          <div className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
+            <VideoOff size={32} className="text-white" />
+          </div>
+          <h2 className="text-xl mb-4">エラーが発生しました</h2>
+          <p className="text-gray-400 mb-6">{error}</p>
+          <div className="space-y-3">
+            <button
+              onClick={() => window.location.reload()}
+              className="w-full px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+            >
+              再読み込み
+            </button>
+            <button
+              onClick={onLeaveCall}
+              className="w-full px-6 py-2 bg-gray-600 hover:bg-gray-700 rounded-lg transition-colors"
+            >
+              ホームに戻る
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (connectionStatus === 'failed' && !error) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
         <div className="text-center text-white">

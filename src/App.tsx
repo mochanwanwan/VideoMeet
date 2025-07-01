@@ -16,6 +16,7 @@ function App() {
   });
 
   const handleJoinRoom = (roomId: string, userName: string) => {
+    console.log('Joining room:', roomId, 'as:', userName);
     setCallState({
       isInCall: true,
       roomId,
@@ -24,6 +25,7 @@ function App() {
   };
 
   const handleLeaveCall = () => {
+    console.log('Leaving call');
     setCallState({
       isInCall: false,
       roomId: '',
@@ -31,8 +33,10 @@ function App() {
     });
   };
 
+  console.log('App render - callState:', callState);
+
   return (
-    <div className="App">
+    <div className="App min-h-screen">
       {callState.isInCall ? (
         <VideoCall
           roomId={callState.roomId}
