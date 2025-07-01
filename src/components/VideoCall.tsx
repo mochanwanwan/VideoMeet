@@ -29,33 +29,50 @@ interface VideoCallProps {
   onLeaveCall: () => void;
 }
 
-const STUN_SERVERS = [
+// より多くのSTUN/TURNサーバーを追加
+const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
   { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' }
+  { urls: 'stun:stun4.l.google.com:19302' },
+  // 無料のTURNサーバーを追加
+  {
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject'
+  }
 ];
 
-// 低負荷設定: 小さい解像度とフレームレート
+// 低負荷設定: さらに小さい解像度
 const LOW_QUALITY_VIDEO_CONSTRAINTS = {
-  width: { ideal: 320, max: 480 },
-  height: { ideal: 240, max: 360 },
-  frameRate: { ideal: 15, max: 20 }
+  width: { ideal: 240, max: 320 },
+  height: { ideal: 180, max: 240 },
+  frameRate: { ideal: 10, max: 15 }
 };
 
 const LOW_QUALITY_SCREEN_CONSTRAINTS = {
-  width: { ideal: 640, max: 1280 },
-  height: { ideal: 480, max: 720 },
-  frameRate: { ideal: 10, max: 15 }
+  width: { ideal: 480, max: 640 },
+  height: { ideal: 360, max: 480 },
+  frameRate: { ideal: 5, max: 10 }
 };
 
 const AUDIO_CONSTRAINTS = {
   echoCancellation: true,
   noiseSuppression: true,
   autoGainControl: true,
-  sampleRate: 16000, // 低いサンプルレート
-  channelCount: 1     // モノラル
+  sampleRate: 16000,
+  channelCount: 1
 };
 
 export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveCall }) => {
@@ -69,6 +86,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
   const [showRoomInfo, setShowRoomInfo] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
@@ -97,7 +115,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
           localVideoRef.current.srcObject = stream;
         }
 
-        // Initialize socket connection - use same origin for production
+        // Initialize socket connection
         const socketUrl = window.location.origin;
         
         console.log('Connecting to socket server:', socketUrl);
@@ -106,9 +124,10 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
           timeout: 20000,
           forceNew: true,
           reconnection: true,
-          reconnectionAttempts: 5,
+          reconnectionAttempts: 10,
           reconnectionDelay: 1000,
-          reconnectionDelayMax: 5000
+          reconnectionDelayMax: 5000,
+          maxReconnectionAttempts: 10
         });
         
         socketRef.current = newSocket;
@@ -123,7 +142,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
             if (newSocket.connected) {
               newSocket.emit('ping');
             }
-          }, 25000); // 25秒ごとにpingを送信
+          }, 25000);
         };
 
         // Socket event handlers
@@ -131,6 +150,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
           console.log('Socket connected with ID:', newSocket.id);
           setConnectionStatus('connected');
           setError(null);
+          setReconnectAttempts(0);
           startHeartbeat();
           
           // Join room after socket connection is established
@@ -146,6 +166,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
           console.error('Socket connection error:', error);
           setConnectionStatus('failed');
           setError('サーバーに接続できません');
+          setReconnectAttempts(prev => prev + 1);
         });
 
         newSocket.on('disconnect', (reason) => {
@@ -158,9 +179,10 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
           
           // 自動再接続の試行
           if (reason === 'io server disconnect') {
-            // サーバーが切断した場合は手動で再接続
             setTimeout(() => {
-              newSocket.connect();
+              if (!newSocket.connected) {
+                newSocket.connect();
+              }
             }, 1000);
           }
         });
@@ -174,7 +196,6 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
           console.log('=== USER JOINED EVENT ===');
           console.log('New user joined:', newUserId, newUserName);
           
-          // Add participant to state
           setParticipants(prev => {
             const updated = new Map(prev);
             if (!updated.has(newUserId)) {
@@ -189,8 +210,10 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
             return updated;
           });
 
-          // Create peer connection and send offer
-          await createOfferForUser(newUserId, stream, newSocket);
+          // 少し遅延を入れてからオファーを作成
+          setTimeout(() => {
+            createOfferForUser(newUserId, stream, newSocket);
+          }, 500);
         });
 
         newSocket.on('room-participants', (participantsList: Participant[]) => {
@@ -321,9 +344,11 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
     console.log('Creating peer connection for:', targetUserId);
     
     const peerConnection = new RTCPeerConnection({
-      iceServers: STUN_SERVERS,
+      iceServers: ICE_SERVERS,
       iceCandidatePoolSize: 10,
-      iceTransportPolicy: 'all'
+      iceTransportPolicy: 'all',
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require'
     });
 
     // Add local stream tracks
@@ -362,48 +387,67 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
       });
     };
 
-    // Handle ICE candidates
+    // Handle ICE candidates with better error handling
     peerConnection.onicecandidate = (event) => {
       if (event.candidate && socketRef.current) {
-        console.log('Sending ICE candidate to:', targetUserId);
+        console.log('Sending ICE candidate to:', targetUserId, 'type:', event.candidate.type);
         socketRef.current.emit('ice-candidate', {
           targetUserId,
           candidate: event.candidate,
           roomId
         });
+      } else if (!event.candidate) {
+        console.log('ICE gathering complete for:', targetUserId);
       }
     };
 
-    // Handle connection state changes with better error handling
+    // Handle connection state changes with aggressive reconnection
     peerConnection.onconnectionstatechange = () => {
       console.log(`Peer connection state with ${targetUserId}:`, peerConnection.connectionState);
+      
       if (peerConnection.connectionState === 'failed') {
         console.log('Peer connection failed, attempting to restart ICE');
         peerConnection.restartIce();
       } else if (peerConnection.connectionState === 'disconnected') {
         console.log('Peer connection disconnected, will attempt to reconnect');
-        // 短時間後に再接続を試行
+        // より短い間隔で再接続を試行
         setTimeout(() => {
-          if (peerConnection.connectionState === 'disconnected') {
+          if (peerConnection.connectionState === 'disconnected' || 
+              peerConnection.connectionState === 'failed') {
+            console.log('Attempting ICE restart for:', targetUserId);
             peerConnection.restartIce();
           }
-        }, 3000);
+        }, 1000);
+      } else if (peerConnection.connectionState === 'connected') {
+        console.log('Peer connection established successfully with:', targetUserId);
       }
     };
 
     peerConnection.oniceconnectionstatechange = () => {
       console.log(`ICE connection state with ${targetUserId}:`, peerConnection.iceConnectionState);
+      
       if (peerConnection.iceConnectionState === 'failed') {
-        console.log('ICE connection failed, restarting ICE');
+        console.log('ICE connection failed, restarting ICE for:', targetUserId);
         peerConnection.restartIce();
+      } else if (peerConnection.iceConnectionState === 'disconnected') {
+        console.log('ICE connection disconnected for:', targetUserId);
+        // 短時間後に再接続を試行
+        setTimeout(() => {
+          if (peerConnection.iceConnectionState === 'disconnected' || 
+              peerConnection.iceConnectionState === 'failed') {
+            console.log('Attempting ICE restart due to disconnection:', targetUserId);
+            peerConnection.restartIce();
+          }
+        }, 2000);
+      } else if (peerConnection.iceConnectionState === 'connected' || 
+                 peerConnection.iceConnectionState === 'completed') {
+        console.log('ICE connection established with:', targetUserId);
       }
     };
 
-    // データチャンネルの状態監視
-    peerConnection.ondatachannel = (event) => {
-      const channel = event.channel;
-      channel.onopen = () => console.log('Data channel opened with:', targetUserId);
-      channel.onclose = () => console.log('Data channel closed with:', targetUserId);
+    // ICE gathering state
+    peerConnection.onicegatheringstatechange = () => {
+      console.log(`ICE gathering state with ${targetUserId}:`, peerConnection.iceGatheringState);
     };
 
     peerConnections.current.set(targetUserId, peerConnection);
@@ -417,7 +461,8 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
       
       const offer = await peerConnection.createOffer({
         offerToReceiveAudio: true,
-        offerToReceiveVideo: true
+        offerToReceiveVideo: true,
+        iceRestart: false
       });
       
       await peerConnection.setLocalDescription(offer);
@@ -475,7 +520,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
       const peerConnection = peerConnections.current.get(senderUserId);
       if (peerConnection && peerConnection.remoteDescription) {
         await peerConnection.addIceCandidate(candidate);
-        console.log('ICE candidate added from:', senderUserId);
+        console.log('ICE candidate added from:', senderUserId, 'type:', candidate.candidate?.split(' ')[7]);
       } else {
         console.log('Peer connection not ready for ICE candidate from:', senderUserId);
       }
@@ -523,7 +568,6 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
   const toggleScreenShare = useCallback(async () => {
     if (!isScreenSharing) {
       try {
-        // 低品質設定で画面共有を開始
         const screenStream = await navigator.mediaDevices.getDisplayMedia({
           video: LOW_QUALITY_SCREEN_CONSTRAINTS,
           audio: {
@@ -602,7 +646,6 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
       if (navigator.share) {
         await navigator.share(shareData);
       } else {
-        // Fallback to copying URL
         await navigator.clipboard.writeText(shareUrl);
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
@@ -613,7 +656,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
   }, [roomId]);
 
   const participantsList = Array.from(participants.values());
-  const totalParticipants = participantsList.length + 1; // +1 for local user
+  const totalParticipants = participantsList.length + 1;
 
   // Calculate grid layout based on number of participants
   const getGridLayout = (count: number) => {
@@ -622,18 +665,18 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
     if (count <= 4) return 'grid-cols-2 grid-rows-2';
     if (count <= 6) return 'grid-cols-3 grid-rows-2';
     if (count <= 9) return 'grid-cols-3 grid-rows-3';
-    return 'grid-cols-4 grid-rows-3'; // For more than 9 participants
+    return 'grid-cols-4 grid-rows-3';
   };
 
   // エラー状態の表示
-  if (error) {
+  if (error && reconnectAttempts > 5) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
         <div className="text-center text-white max-w-md mx-auto p-6">
           <div className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center mx-auto mb-4">
             <VideoOff size={32} className="text-white" />
           </div>
-          <h2 className="text-xl mb-4">エラーが発生しました</h2>
+          <h2 className="text-xl mb-4">接続エラー</h2>
           <p className="text-gray-400 mb-6">{error}</p>
           <div className="space-y-3">
             <button
@@ -654,18 +697,15 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
     );
   }
 
-  if (connectionStatus === 'failed' && !error) {
+  if (connectionStatus === 'connecting') {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center">
         <div className="text-center text-white">
-          <h2 className="text-xl mb-4">接続に失敗しました</h2>
-          <p className="text-gray-400 mb-6">サーバーに接続できませんでした。ネットワーク接続を確認してください。</p>
-          <button
-            onClick={onLeaveCall}
-            className="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
-          >
-            ホームに戻る
-          </button>
+          <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <h2 className="text-xl mb-2">接続中...</h2>
+          <p className="text-gray-400">
+            {reconnectAttempts > 0 ? `再接続試行中 (${reconnectAttempts}/10)` : 'サーバーに接続しています'}
+          </p>
         </div>
       </div>
     );
@@ -698,7 +738,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
              connectionStatus === 'connecting' ? '接続中' : '接続失敗'}
           </span>
           <div className="text-xs text-green-400 bg-green-900 px-2 py-1 rounded">
-            低負荷モード
+            超低負荷モード
           </div>
         </div>
       </div>
@@ -747,7 +787,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
               </div>
             </div>
             <div className="mt-3 p-2 bg-green-900 rounded text-green-200 text-xs">
-              <strong>省電力モード:</strong> 低解像度・低フレームレートで動作中
+              <strong>超省電力モード:</strong> 240p解像度・10fps・TURNサーバー対応
             </div>
             <button
               onClick={() => setShowRoomInfo(false)}
@@ -759,11 +799,11 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         </div>
       )}
 
-      {/* Video Grid - アスペクト比を維持して小さく表示 */}
-      <div className="flex-1 p-2">
+      {/* Video Grid - 非常に小さく表示 */}
+      <div className="flex-1 p-1">
         <div className={`grid gap-1 h-full ${getGridLayout(totalParticipants)}`}>
-          {/* Local Video - アスペクト比16:9を維持 */}
-          <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video">
+          {/* Local Video - 16:9アスペクト比を維持、非常に小さく */}
+          <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video max-h-48">
             <video
               ref={localVideoRef}
               autoPlay
@@ -773,8 +813,8 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
             />
             {!isVideoOn && (
               <div className="absolute inset-0 bg-gray-700 flex items-center justify-center">
-                <div className="w-12 h-12 bg-gray-600 rounded-full flex items-center justify-center">
-                  <span className="text-white text-sm font-semibold">
+                <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center">
+                  <span className="text-white text-xs font-semibold">
                     {userName.charAt(0).toUpperCase()}
                   </span>
                 </div>
@@ -785,19 +825,19 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
             </div>
             <div className="absolute top-1 right-1 flex space-x-1">
               {!isAudioOn && (
-                <div className="w-5 h-5 bg-red-500 rounded-full flex items-center justify-center">
-                  <MicOff size={10} className="text-white" />
+                <div className="w-4 h-4 bg-red-500 rounded-full flex items-center justify-center">
+                  <MicOff size={8} className="text-white" />
                 </div>
               )}
               {isScreenSharing && (
-                <div className="w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center">
-                  <Monitor size={10} className="text-white" />
+                <div className="w-4 h-4 bg-blue-500 rounded-full flex items-center justify-center">
+                  <Monitor size={8} className="text-white" />
                 </div>
               )}
             </div>
           </div>
 
-          {/* Remote Videos - アスペクト比16:9を維持 */}
+          {/* Remote Videos - 非常に小さく表示 */}
           {participantsList.map((participant) => (
             <RemoteVideo
               key={participant.userId}
@@ -879,7 +919,6 @@ const RemoteVideo: React.FC<RemoteVideoProps> = ({ participant }) => {
       videoRef.current.srcObject = participant.stream;
       console.log('Set video stream for participant:', participant.userId);
       
-      // ビデオ要素のイベントリスナーを追加
       const videoElement = videoRef.current;
       
       const handleLoadedMetadata = () => {
@@ -907,7 +946,7 @@ const RemoteVideo: React.FC<RemoteVideoProps> = ({ participant }) => {
   }, [participant.stream, participant.userId]);
 
   return (
-    <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video">
+    <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video max-h-48">
       {participant.stream && participant.isVideoOn !== false ? (
         <video
           ref={videoRef}
@@ -917,8 +956,8 @@ const RemoteVideo: React.FC<RemoteVideoProps> = ({ participant }) => {
         />
       ) : (
         <div className="w-full h-full bg-gray-700 flex items-center justify-center">
-          <div className="w-12 h-12 bg-gray-600 rounded-full flex items-center justify-center">
-            <span className="text-white text-sm font-semibold">
+          <div className="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center">
+            <span className="text-white text-xs font-semibold">
               {participant.userName.charAt(0).toUpperCase()}
             </span>
           </div>
@@ -931,8 +970,8 @@ const RemoteVideo: React.FC<RemoteVideoProps> = ({ participant }) => {
       
       <div className="absolute top-1 right-1 flex space-x-1">
         {participant.isAudioOn === false && (
-          <div className="w-5 h-5 bg-red-500 rounded-full flex items-center justify-center">
-            <MicOff size={10} className="text-white" />
+          <div className="w-4 h-4 bg-red-500 rounded-full flex items-center justify-center">
+            <MicOff size={8} className="text-white" />
           </div>
         )}
       </div>
