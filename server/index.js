@@ -168,6 +168,17 @@ io.on('connection', (socket) => {
     }
   });
 
+  // 画面共有イベントの追加
+  socket.on('screen-share-started', ({ roomId, userId, userName }) => {
+    console.log(`User ${userName} (${userId}) started screen sharing in room ${roomId}`);
+    socket.to(roomId).emit('user-screen-share-started', { userId, userName });
+  });
+
+  socket.on('screen-share-stopped', ({ roomId, userId }) => {
+    console.log(`User ${userId} stopped screen sharing in room ${roomId}`);
+    socket.to(roomId).emit('user-screen-share-stopped', { userId });
+  });
+
   socket.on('disconnect', (reason) => {
     console.log('=== USER DISCONNECTED ===');
     console.log('Socket disconnected:', socket.id, 'Reason:', reason);

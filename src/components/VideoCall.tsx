@@ -11,7 +11,10 @@ import {
   MessageSquare,
   Copy,
   Share2,
-  Check
+  Check,
+  Maximize2,
+  Minimize2,
+  X
 } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 
@@ -21,12 +24,24 @@ interface Participant {
   stream?: MediaStream;
   isVideoOn?: boolean;
   isAudioOn?: boolean;
+  isScreenSharing?: boolean;
 }
 
 interface VideoCallProps {
   roomId: string;
   userName: string;
   onLeaveCall: () => void;
+}
+
+interface VideoSize {
+  width: number;
+  height: number;
+}
+
+interface ScreenShareWindow {
+  stream: MediaStream;
+  userName: string;
+  userId: string;
 }
 
 // より多くのSTUN/TURNサーバーを追加
@@ -84,6 +99,7 @@ const AUDIO_CONSTRAINTS = {
 export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveCall }) => {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [localCameraStream, setLocalCameraStream] = useState<MediaStream | null>(null);
   const [participants, setParticipants] = useState<Map<string, Participant>>(new Map());
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [isAudioOn, setIsAudioOn] = useState(true);
@@ -94,8 +110,11 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
   const [error, setError] = useState<string | null>(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [debugInfo, setDebugInfo] = useState<string[]>([]);
+  const [videoSizes, setVideoSizes] = useState<Map<string, VideoSize>>(new Map());
+  const [screenShareWindow, setScreenShareWindow] = useState<ScreenShareWindow | null>(null);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
+  const localCameraRef = useRef<HTMLVideoElement>(null);
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
   const userId = useRef(Math.random().toString(36).substr(2, 9));
   const socketRef = useRef<Socket | null>(null);
@@ -103,12 +122,56 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const connectionMonitorRef = useRef<NodeJS.Timeout | null>(null);
 
+  // ブラウザ拡張機能エラーを抑制
+  useEffect(() => {
+    // コンソールエラーをフィルタリング
+    const originalError = console.error;
+    console.error = (...args) => {
+      const message = args.join(' ');
+      // ブラウザ拡張機能関連のエラーを無視
+      if (
+        message.includes('FrameDoesNotExistError') ||
+        message.includes('DelayedMessageSender') ||
+        message.includes('background.js') ||
+        message.includes('Could not establish connection') ||
+        message.includes('Receiving end does not exist') ||
+        message.includes('The message port closed')
+      ) {
+        return; // エラーを無視
+      }
+      originalError.apply(console, args);
+    };
+
+    return () => {
+      console.error = originalError;
+    };
+  }, []);
+
   // デバッグ情報を追加する関数
   const addDebugInfo = useCallback((message: string) => {
     const timestamp = new Date().toLocaleTimeString();
     const debugMessage = `[${timestamp}] ${message}`;
     console.log('🔍 DEBUG:', debugMessage);
     setDebugInfo(prev => [...prev.slice(-20), debugMessage]); // 最新20件を保持
+  }, []);
+
+  // ビデオサイズを更新する関数
+  const updateVideoSize = useCallback((participantId: string, width: number, height: number) => {
+    setVideoSizes(prev => {
+      const updated = new Map(prev);
+      updated.set(participantId, { width, height });
+      return updated;
+    });
+  }, []);
+
+  // 画面共有ウィンドウを開く
+  const openScreenShareWindow = useCallback((stream: MediaStream, userName: string, userId: string) => {
+    setScreenShareWindow({ stream, userName, userId });
+  }, []);
+
+  // 画面共有ウィンドウを閉じる
+  const closeScreenShareWindow = useCallback(() => {
+    setScreenShareWindow(null);
   }, []);
 
   // 接続状態を定期的に監視
@@ -156,6 +219,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         
         addDebugInfo(`📹 Got local stream with ${stream.getTracks().length} tracks`);
         setLocalStream(stream);
+        setLocalCameraStream(stream.clone()); // カメラストリームを別途保存
         
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
@@ -252,7 +316,8 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
                 userId: newUserId, 
                 userName: newUserName, 
                 isVideoOn: true, 
-                isAudioOn: true 
+                isAudioOn: true,
+                isScreenSharing: false
               });
             }
             return updated;
@@ -275,7 +340,8 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
                 updated.set(participant.userId, { 
                   ...participant, 
                   isVideoOn: true, 
-                  isAudioOn: true 
+                  isAudioOn: true,
+                  isScreenSharing: false
                 });
               }
             });
@@ -340,6 +406,30 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
           });
         });
 
+        newSocket.on('user-screen-share-started', ({ userId: sharingUserId, userName: sharingUserName }) => {
+          addDebugInfo(`🖥️ User started screen sharing: ${sharingUserId} (${sharingUserName})`);
+          setParticipants(prev => {
+            const updated = new Map(prev);
+            const participant = updated.get(sharingUserId);
+            if (participant) {
+              updated.set(sharingUserId, { ...participant, isScreenSharing: true });
+            }
+            return updated;
+          });
+        });
+
+        newSocket.on('user-screen-share-stopped', ({ userId: sharingUserId }) => {
+          addDebugInfo(`🖥️ User stopped screen sharing: ${sharingUserId}`);
+          setParticipants(prev => {
+            const updated = new Map(prev);
+            const participant = updated.get(sharingUserId);
+            if (participant) {
+              updated.set(sharingUserId, { ...participant, isScreenSharing: false });
+            }
+            return updated;
+          });
+        });
+
       } catch (error) {
         addDebugInfo(`❌ Error initializing call: ${error}`);
         setConnectionStatus('failed');
@@ -368,6 +458,11 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         localStream.getTracks().forEach(track => {
           track.stop();
           addDebugInfo(`🛑 Stopped track: ${track.kind}`);
+        });
+      }
+      if (localCameraStream) {
+        localCameraStream.getTracks().forEach(track => {
+          track.stop();
         });
       }
       
@@ -427,7 +522,14 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         const participant = updated.get(targetUserId);
         if (participant) {
           addDebugInfo(`📺 Setting stream for participant: ${targetUserId}`);
-          updated.set(targetUserId, { ...participant, stream: remoteStream });
+          const updatedParticipant = { ...participant, stream: remoteStream };
+          
+          // 画面共有の場合は別ウィンドウで表示
+          if (participant.isScreenSharing) {
+            openScreenShareWindow(remoteStream, participant.userName, targetUserId);
+          }
+          
+          updated.set(targetUserId, updatedParticipant);
         }
         return updated;
       });
@@ -634,12 +736,24 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
           }
         });
         
-        if (localVideoRef.current) {
-          localVideoRef.current.srcObject = screenStream;
+        // 画面共有ストリームを別ウィンドウで表示
+        openScreenShareWindow(screenStream, userName, userId.current);
+        
+        // ローカルビデオは引き続きカメラを表示
+        if (localVideoRef.current && localCameraStream) {
+          localVideoRef.current.srcObject = localCameraStream;
         }
         
         setIsScreenSharing(true);
         addDebugInfo('✅ Screen share started');
+        
+        if (socket) {
+          socket.emit('screen-share-started', {
+            roomId,
+            userId: userId.current,
+            userName
+          });
+        }
         
         videoTrack.onended = () => {
           addDebugInfo('🖥️ Screen share ended by user');
@@ -652,12 +766,12 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
     } else {
       stopScreenShare();
     }
-  }, [isScreenSharing, addDebugInfo]);
+  }, [isScreenSharing, addDebugInfo, localCameraStream, socket, roomId, userName, openScreenShareWindow]);
 
   const stopScreenShare = useCallback(async () => {
-    if (localStream) {
+    if (localCameraStream) {
       addDebugInfo('🖥️ Stopping screen share');
-      const videoTrack = localStream.getVideoTracks()[0];
+      const videoTrack = localCameraStream.getVideoTracks()[0];
       
       // Replace screen share track with camera track
       peerConnections.current.forEach(pc => {
@@ -668,13 +782,21 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
       });
       
       if (localVideoRef.current) {
-        localVideoRef.current.srcObject = localStream;
+        localVideoRef.current.srcObject = localCameraStream;
       }
       
+      closeScreenShareWindow();
       setIsScreenSharing(false);
       addDebugInfo('✅ Screen share stopped');
+      
+      if (socket) {
+        socket.emit('screen-share-stopped', {
+          roomId,
+          userId: userId.current
+        });
+      }
     }
-  }, [localStream, addDebugInfo]);
+  }, [localCameraStream, addDebugInfo, socket, roomId, closeScreenShareWindow]);
 
   const copyRoomId = useCallback(async () => {
     try {
@@ -856,7 +978,7 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
               </div>
             </div>
             <div className="mt-3 p-2 bg-green-900 rounded text-green-200 text-xs">
-              <strong>超省電力モード:</strong> 160p解像度・8fps・複数TURNサーバー対応
+              <strong>新機能:</strong> リサイズ可能なビデオ・画面共有別窓表示・エラー修正済み
             </div>
             <button
               onClick={() => setShowRoomInfo(false)}
@@ -868,49 +990,38 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
         </div>
       )}
 
-      {/* Video Grid - 非常に小さく表示 */}
+      {/* Screen Share Window */}
+      {screenShareWindow && (
+        <ScreenShareModal
+          stream={screenShareWindow.stream}
+          userName={screenShareWindow.userName}
+          onClose={closeScreenShareWindow}
+        />
+      )}
+
+      {/* Video Grid - リサイズ可能 */}
       <div className="flex-1 p-1">
         <div className={`grid gap-1 h-full ${getGridLayout(totalParticipants)}`}>
-          {/* Local Video - 16:9アスペクト比を維持、非常に小さく */}
-          <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video max-h-32">
-            <video
-              ref={localVideoRef}
-              autoPlay
-              muted
-              playsInline
-              className="w-full h-full object-cover"
-            />
-            {!isVideoOn && (
-              <div className="absolute inset-0 bg-gray-700 flex items-center justify-center">
-                <div className="w-6 h-6 bg-gray-600 rounded-full flex items-center justify-center">
-                  <span className="text-white text-xs font-semibold">
-                    {userName.charAt(0).toUpperCase()}
-                  </span>
-                </div>
-              </div>
-            )}
-            <div className="absolute bottom-1 left-1 bg-black bg-opacity-60 px-1 py-0.5 rounded text-white text-xs">
-              {userName} (あなた)
-            </div>
-            <div className="absolute top-1 right-1 flex space-x-1">
-              {!isAudioOn && (
-                <div className="w-3 h-3 bg-red-500 rounded-full flex items-center justify-center">
-                  <MicOff size={6} className="text-white" />
-                </div>
-              )}
-              {isScreenSharing && (
-                <div className="w-3 h-3 bg-blue-500 rounded-full flex items-center justify-center">
-                  <Monitor size={6} className="text-white" />
-                </div>
-              )}
-            </div>
-          </div>
+          {/* Local Video - リサイズ可能 */}
+          <ResizableVideo
+            videoRef={localVideoRef}
+            userName={userName}
+            isLocal={true}
+            isVideoOn={isVideoOn}
+            isAudioOn={isAudioOn}
+            isScreenSharing={isScreenSharing}
+            participantId="local"
+            videoSizes={videoSizes}
+            updateVideoSize={updateVideoSize}
+          />
 
-          {/* Remote Videos - 非常に小さく表示 */}
+          {/* Remote Videos - リサイズ可能 */}
           {participantsList.map((participant) => (
-            <RemoteVideo
+            <ResizableRemoteVideo
               key={participant.userId}
               participant={participant}
+              videoSizes={videoSizes}
+              updateVideoSize={updateVideoSize}
             />
           ))}
         </div>
@@ -976,46 +1087,210 @@ export const VideoCall: React.FC<VideoCallProps> = ({ roomId, userName, onLeaveC
   );
 };
 
-interface RemoteVideoProps {
-  participant: Participant;
+// リサイズ可能なビデオコンポーネント
+interface ResizableVideoProps {
+  videoRef: React.RefObject<HTMLVideoElement>;
+  userName: string;
+  isLocal: boolean;
+  isVideoOn: boolean;
+  isAudioOn: boolean;
+  isScreenSharing: boolean;
+  participantId: string;
+  videoSizes: Map<string, VideoSize>;
+  updateVideoSize: (participantId: string, width: number, height: number) => void;
 }
 
-const RemoteVideo: React.FC<RemoteVideoProps> = ({ participant }) => {
+const ResizableVideo: React.FC<ResizableVideoProps> = ({
+  videoRef,
+  userName,
+  isLocal,
+  isVideoOn,
+  isAudioOn,
+  isScreenSharing,
+  participantId,
+  videoSizes,
+  updateVideoSize
+}) => {
+  const [isResizing, setIsResizing] = useState(false);
+  const [startPos, setStartPos] = useState({ x: 0, y: 0 });
+  const [startSize, setStartSize] = useState({ width: 0, height: 0 });
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const currentSize = videoSizes.get(participantId) || { width: 200, height: 150 };
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+    setStartPos({ x: e.clientX, y: e.clientY });
+    setStartSize(currentSize);
+  };
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing) return;
+
+    const deltaX = e.clientX - startPos.x;
+    const deltaY = e.clientY - startPos.y;
+    
+    const newWidth = Math.max(160, Math.min(800, startSize.width + deltaX));
+    const newHeight = Math.max(120, Math.min(600, startSize.height + deltaY));
+    
+    updateVideoSize(participantId, newWidth, newHeight);
+  }, [isResizing, startPos, startSize, participantId, updateVideoSize]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+    }
+  }, [isResizing, handleMouseMove, handleMouseUp]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative bg-gray-800 rounded-lg overflow-hidden border-2 border-gray-600 hover:border-blue-500 transition-colors"
+      style={{
+        width: `${currentSize.width}px`,
+        height: `${currentSize.height}px`,
+        minWidth: '160px',
+        minHeight: '120px',
+        maxWidth: '800px',
+        maxHeight: '600px'
+      }}
+    >
+      <video
+        ref={videoRef}
+        autoPlay
+        muted={isLocal}
+        playsInline
+        className="w-full h-full object-cover"
+      />
+      
+      {!isVideoOn && (
+        <div className="absolute inset-0 bg-gray-700 flex items-center justify-center">
+          <div className="w-12 h-12 bg-gray-600 rounded-full flex items-center justify-center">
+            <span className="text-white text-sm font-semibold">
+              {userName.charAt(0).toUpperCase()}
+            </span>
+          </div>
+        </div>
+      )}
+      
+      <div className="absolute bottom-2 left-2 bg-black bg-opacity-60 px-2 py-1 rounded text-white text-sm">
+        {userName} {isLocal && '(あなた)'}
+      </div>
+      
+      <div className="absolute top-2 right-2 flex space-x-1">
+        {!isAudioOn && (
+          <div className="w-6 h-6 bg-red-500 rounded-full flex items-center justify-center">
+            <MicOff size={12} className="text-white" />
+          </div>
+        )}
+        {isScreenSharing && (
+          <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center">
+            <Monitor size={12} className="text-white" />
+          </div>
+        )}
+      </div>
+
+      {/* リサイズハンドル */}
+      <div
+        className="absolute bottom-0 right-0 w-4 h-4 bg-blue-500 cursor-se-resize opacity-50 hover:opacity-100 transition-opacity"
+        onMouseDown={handleMouseDown}
+        title="ドラッグしてサイズ変更"
+      >
+        <div className="w-full h-full flex items-end justify-end">
+          <div className="w-2 h-2 bg-white rounded-tl-sm"></div>
+        </div>
+      </div>
+
+      {/* サイズ表示 */}
+      <div className="absolute top-2 left-2 bg-black bg-opacity-60 px-1 py-0.5 rounded text-white text-xs">
+        {currentSize.width}×{currentSize.height}
+      </div>
+    </div>
+  );
+};
+
+// リサイズ可能なリモートビデオコンポーネント
+interface ResizableRemoteVideoProps {
+  participant: Participant;
+  videoSizes: Map<string, VideoSize>;
+  updateVideoSize: (participantId: string, width: number, height: number) => void;
+}
+
+const ResizableRemoteVideo: React.FC<ResizableRemoteVideoProps> = ({
+  participant,
+  videoSizes,
+  updateVideoSize
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [isResizing, setIsResizing] = useState(false);
+  const [startPos, setStartPos] = useState({ x: 0, y: 0 });
+  const [startSize, setStartSize] = useState({ width: 0, height: 0 });
+
+  const currentSize = videoSizes.get(participant.userId) || { width: 200, height: 150 };
 
   useEffect(() => {
     if (videoRef.current && participant.stream) {
       videoRef.current.srcObject = participant.stream;
       console.log('🔍 DEBUG: Set video stream for participant:', participant.userId);
-      
-      const videoElement = videoRef.current;
-      
-      const handleLoadedMetadata = () => {
-        console.log('🔍 DEBUG: Video metadata loaded for:', participant.userId);
-      };
-      
-      const handleCanPlay = () => {
-        console.log('🔍 DEBUG: Video can play for:', participant.userId);
-      };
-      
-      const handleError = (e: Event) => {
-        console.error('🔍 DEBUG: Video error for:', participant.userId, e);
-      };
-      
-      videoElement.addEventListener('loadedmetadata', handleLoadedMetadata);
-      videoElement.addEventListener('canplay', handleCanPlay);
-      videoElement.addEventListener('error', handleError);
-      
-      return () => {
-        videoElement.removeEventListener('loadedmetadata', handleLoadedMetadata);
-        videoElement.removeEventListener('canplay', handleCanPlay);
-        videoElement.removeEventListener('error', handleError);
-      };
     }
   }, [participant.stream, participant.userId]);
 
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+    setStartPos({ x: e.clientX, y: e.clientY });
+    setStartSize(currentSize);
+  };
+
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing) return;
+
+    const deltaX = e.clientX - startPos.x;
+    const deltaY = e.clientY - startPos.y;
+    
+    const newWidth = Math.max(160, Math.min(800, startSize.width + deltaX));
+    const newHeight = Math.max(120, Math.min(600, startSize.height + deltaY));
+    
+    updateVideoSize(participant.userId, newWidth, newHeight);
+  }, [isResizing, startPos, startSize, participant.userId, updateVideoSize]);
+
+  const handleMouseUp = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      return () => {
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+    }
+  }, [isResizing, handleMouseMove, handleMouseUp]);
+
   return (
-    <div className="relative bg-gray-800 rounded-lg overflow-hidden aspect-video max-h-32">
+    <div
+      className="relative bg-gray-800 rounded-lg overflow-hidden border-2 border-gray-600 hover:border-blue-500 transition-colors"
+      style={{
+        width: `${currentSize.width}px`,
+        height: `${currentSize.height}px`,
+        minWidth: '160px',
+        minHeight: '120px',
+        maxWidth: '800px',
+        maxHeight: '600px'
+      }}
+    >
       {participant.stream && participant.isVideoOn !== false ? (
         <video
           ref={videoRef}
@@ -1025,24 +1300,111 @@ const RemoteVideo: React.FC<RemoteVideoProps> = ({ participant }) => {
         />
       ) : (
         <div className="w-full h-full bg-gray-700 flex items-center justify-center">
-          <div className="w-6 h-6 bg-gray-600 rounded-full flex items-center justify-center">
-            <span className="text-white text-xs font-semibold">
+          <div className="w-12 h-12 bg-gray-600 rounded-full flex items-center justify-center">
+            <span className="text-white text-sm font-semibold">
               {participant.userName.charAt(0).toUpperCase()}
             </span>
           </div>
         </div>
       )}
       
-      <div className="absolute bottom-1 left-1 bg-black bg-opacity-60 px-1 py-0.5 rounded text-white text-xs">
+      <div className="absolute bottom-2 left-2 bg-black bg-opacity-60 px-2 py-1 rounded text-white text-sm">
         {participant.userName}
       </div>
       
-      <div className="absolute top-1 right-1 flex space-x-1">
+      <div className="absolute top-2 right-2 flex space-x-1">
         {participant.isAudioOn === false && (
-          <div className="w-3 h-3 bg-red-500 rounded-full flex items-center justify-center">
-            <MicOff size={6} className="text-white" />
+          <div className="w-6 h-6 bg-red-500 rounded-full flex items-center justify-center">
+            <MicOff size={12} className="text-white" />
           </div>
         )}
+        {participant.isScreenSharing && (
+          <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center">
+            <Monitor size={12} className="text-white" />
+          </div>
+        )}
+      </div>
+
+      {/* リサイズハンドル */}
+      <div
+        className="absolute bottom-0 right-0 w-4 h-4 bg-blue-500 cursor-se-resize opacity-50 hover:opacity-100 transition-opacity"
+        onMouseDown={handleMouseDown}
+        title="ドラッグしてサイズ変更"
+      >
+        <div className="w-full h-full flex items-end justify-end">
+          <div className="w-2 h-2 bg-white rounded-tl-sm"></div>
+        </div>
+      </div>
+
+      {/* サイズ表示 */}
+      <div className="absolute top-2 left-2 bg-black bg-opacity-60 px-1 py-0.5 rounded text-white text-xs">
+        {currentSize.width}×{currentSize.height}
+      </div>
+    </div>
+  );
+};
+
+// 画面共有モーダルコンポーネント
+interface ScreenShareModalProps {
+  stream: MediaStream;
+  userName: string;
+  onClose: () => void;
+}
+
+const ScreenShareModal: React.FC<ScreenShareModalProps> = ({ stream, userName, onClose }) => {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  const toggleFullscreen = () => {
+    setIsFullscreen(!isFullscreen);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+      <div 
+        className={`bg-gray-800 rounded-lg overflow-hidden ${
+          isFullscreen ? 'w-full h-full' : 'w-4/5 h-4/5 max-w-4xl max-h-3xl'
+        } transition-all duration-300`}
+      >
+        {/* ヘッダー */}
+        <div className="bg-gray-900 p-3 flex justify-between items-center">
+          <div className="flex items-center space-x-2">
+            <Monitor size={20} className="text-green-400" />
+            <span className="text-white font-medium">{userName}の画面共有</span>
+          </div>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={toggleFullscreen}
+              className="p-2 text-gray-400 hover:text-white transition-colors"
+              title={isFullscreen ? '元のサイズに戻す' : 'フルスクリーン'}
+            >
+              {isFullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+            </button>
+            <button
+              onClick={onClose}
+              className="p-2 text-gray-400 hover:text-white transition-colors"
+              title="閉じる"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+
+        {/* ビデオエリア */}
+        <div className="relative w-full h-full bg-black">
+          <video
+            ref={videoRef}
+            autoPlay
+            playsInline
+            className="w-full h-full object-contain"
+          />
+        </div>
       </div>
     </div>
   );
